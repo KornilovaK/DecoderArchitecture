@@ -1,11 +1,6 @@
-# reflex_attention
+# reflex_attention: Обучение модифицированной архитектуры декодера для генерации текста
+
 Based on nanoGPT, dataset - openwebtext
-
-```pip install torch numpy transformers datasets tiktoken wandb tqdm inspect```
-
-```I used GPU 1xA100 40GB, RAM 128GB```
-
-```Requires version of pytorch >= 2.0 as there's a flash attention```
 
 ## Motivation
 - due to a calculation error with model fleets, it is difficult to fit information about a large context in one hidden ([FACTS](http://arxiv.org/pdf/2406.04267 ))
@@ -29,23 +24,17 @@ Based on nanoGPT, dataset - openwebtext
 
 I didn't totally completed any training 'cause, for example, the last model needed to be trained during 2.28 days:
 1) n_embed = 512 (as in original paper), block_size = 256 (from nanoGPT config for small model), dropout = 0.0. Original VS 4-2-2 Reflex attention 
-<img src="charts/train-val orig-reflex 256-512.jpg" /> <img src="charts/mfu orig-reflex 256-512.png" />
 
-2) n_embed = 512, block_size = 1024 (from nanoGPT GPT2 training), dropout = 0.0. 4-2-2 Reflex attention 256 VS 1024  block_size(with and without bias=True)
-<img src="charts/train-val reflex 256-1024 512.jpg" /> <img src="charts/mfu reflex 256-1024 512.png" />
+2) n_embed = 512, block_size = 1024, dropout = 0.0. 4-2-2 Reflex attention 256 VS 1024  block_size(with and without bias=True)
 
 3) n_embed = 768, block_size = 1024, dropout = 0.0 . 4-2-2 Reflex attention 512 VS 768 n_embed
-<img src="charts/train-val reflex 1024 512-768.png" /> <img src="charts/mfu reflex 1024 512-768.png" />
 
 4) n_embed = 768, block_size = 1024, dropout = 0.0. 4-2-2 Reflex 4-2-2 VS 5-2-1 VS all-layer VS original attention
-<img src="charts/train-val orig reflex 2-all layer.png" /> <img src="charts/mfu orig reflex 2-all layer.png" /> 
 Trained during 7250 models:
     * *Original attention*
     * *5-2-1 Reflex attention*
     * *all layer Reflex attention*
 
-5) n_embed = 768, block_size = 1024, dropout = 0.1 (there's no reason to use it as we can't overfit here)
-<img src="charts/val with dropout.jpg" /> 
 
 ### Conclusion
 In every experiment Reflex attention showed better results than original even after not so many iters (and I guess if I'd train it more, the difference would be bigger). In addition, it turned out that allocating a large number of heads for the previous layer than for the previous previous one is really better
