@@ -38,3 +38,8 @@ Trained during 7250 models:
 
 ### Conclusion
 In every experiment Reflex attention showed better results than original even after not so many iters (and I guess if I'd train it more, the difference would be bigger). In addition, it turned out that allocating a large number of heads for the previous layer than for the previous previous one is really better
+
+## Future experiments
+Я буду не только использовать вручную подобранные статичные гиперпараметры для выбора количества пердыдущих слоев, но и 
+1) использую подбор гиперпараметров по сетке
+2) использую градиентные методы, бустинги, др методы классической мл, чтобы выучить веса, с которыми необходимо использовать соотношение слоев.
