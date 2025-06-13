@@ -1,0 +1,6 @@
+pip install vllm -U
+python -m pip install wheel setuptools
+pip install flash-attn --no-build-isolation
+pip install ipywidgets -U
+pip install torch==2.7.1
+pip install transformers -U

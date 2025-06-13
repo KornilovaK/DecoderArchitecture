@@ -12,13 +12,13 @@ from transformers import GPT2LMHeadModel
 class RMSNorm(nn.Module):
     def __init__(self, ndim, eps=1e-6, bias=False):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
-        self.eps = eps
+        self.weight =   nn.Parameter(torch.ones(ndim))
+        self.bias   =   nn.Parameter(torch.zeros(ndim)) if bias else None
+        self.eps    =   eps
 
     def forward(self, x):
-        rms = torch.sqrt(torch.mean(x.pow(2), dim=-1, keepdim=True))
-        x_normed = x / (rms + self.eps)
+        rms       =   torch.sqrt(torch.mean(x.pow(2), dim=-1, keepdim=True))
+        x_normed  =   x / (rms + self.eps)
         return x_normed * self.weight + self.bias if self.bias else x_normed * self.weight
 
                 
@@ -26,13 +26,14 @@ class Attention(nn.Module):
     def __init__(self, config):
         super().__init__()
         assert config.n_embd % config.n_head == 0
-        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.resid_dropout = nn.Dropout(config.dropout)
-        self.n_head = config.n_head
-        self.n_embd = config.n_embd
-        self.dropout = config.dropout
+        
+        self.c_attn         =   nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.c_proj         =   nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.attn_dropout   =   nn.Dropout(config.dropout)
+        self.resid_dropout  =   nn.Dropout(config.dropout)
+        self.n_head         =   config.n_head
+        self.n_embd         =   config.n_embd
+        self.dropout        =   config.dropout
 
     def forward(self, x, prevs):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
@@ -44,16 +45,15 @@ class Attention(nn.Module):
 
         cur_kv = (k, v)
         sa_h = self.n_head - len(prevs)
-        self_attention = F.scaled_dot_product_attention(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], is_causal=True, dropout_p=self.dropout if self.training else 0)
-        # self_attention = flash_attn_func(q_sa, k_sa, v_sa, causal=True, dropout_p=self.dropout if self.training else 0)
+        # self_attention = F.scaled_dot_product_attention(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], is_causal=True, dropout_p=self.dropout if self.training else 0)
+        self_attention = flash_attn_func(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], causal=True, dropout_p=self.dropout if self.training else 0)
 
-        q = q[:, sa_h:, :, :]
-        assert len(q.shape) == 4
-        
+        q = q[:, sa_h:, :, :]        
         k = torch.cat([cur_k[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
         v = torch.cat([cur_v[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
-        cross_attention = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.dropout if self.training else 0)
-        # cross_attention = flash_attn_func(q, k, v, causal=False, dropout_p=self.dropout if self.training else 0)
+        
+        # cross_attention = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.dropout if self.training else 0)
+        cross_attention = flash_attn_func(q, k, v, causal=False, dropout_p=self.dropout if self.training else 0)
 
         y = torch.cat([self_attention, cross_attention], dim=1)
         y = y.transpose(1, 2).contiguous().view(B, T, C)
@@ -64,48 +64,47 @@ class Attention(nn.Module):
 class SwiGLU(nn.Module):
     def __init__(self, dim_in: int, dim_out: int, bias: bool = True):
         super().__init__()
-
-        self.proj = nn.Linear(dim_in, dim_out * 2, bias=bias)
-        self.activation = nn.SiLU()
+        self.proj       =   nn.Linear(dim_in, dim_out * 2, bias=bias)
+        self.activation =   nn.SiLU()
 
     def forward(self, hidden_states):
-        hidden_states = self.proj(hidden_states)
-        hidden_states, gate = hidden_states.chunk(2, dim=-1)
+        hidden_states       =   self.proj(hidden_states)
+        hidden_states, gate =   hidden_states.chunk(2, dim=-1)
         return hidden_states * self.activation(gate)
 
 
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc    = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.act     = SwiGLU(4 * config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.c_proj  = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
-        self.dropout = nn.Dropout(config.dropout)
+        self.c_fc    =   nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.act     =   SwiGLU(4 * config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.c_proj  =   nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout =   nn.Dropout(config.dropout)
 
     def forward(self, x):
-        x = self.c_fc(x)
-        x = self.act(x)
-        x = self.c_proj(x)
-        x = self.dropout(x)
+        x   =   self.c_fc(x)
+        x   =   self.act(x)
+        x   =   self.c_proj(x)
+        x   =   self.dropout(x)
         return x
 
 
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln_1 = RMSNorm(config.n_embd)
-        self.attn = Attention(config)
-        self.ln_2 = RMSNorm(config.n_embd)
-        self.mlp = MLP(config)
+        self.ln_1   =   RMSNorm(config.n_embd)
+        self.attn   =   Attention(config)
+        self.ln_2   =   RMSNorm(config.n_embd)
+        self.mlp    =   MLP(config)
 
     def forward(self, x, prev_kvs=None):
-        normed_x1 = self.ln_1(x) # PreNorm 1
-        attn_out, kv = self.attn(normed_x1, prev_kvs) # attention block
-        x = x + attn_out # Residual connection + attention block
-        normed_x2 = self.ln_2(x) # PreNorm 2
-        ffn = self.mlp(normed_x2) # FFN
-        x = x + ffn # Residual connection + FFN
-        return x, kv # return layer output + current kv hiddens
+        normed_x1    =   self.ln_1(x)                    # PreNorm 1
+        attn_out, kv =   self.attn(normed_x1, prev_kvs)  # attention block
+        x            =   x + attn_out                    # Residual connection + attention block
+        normed_x2    =   self.ln_2(x)                    # PreNorm 2
+        ffn          =   self.mlp(normed_x2)             # FFN
+        x            =   x + ffn                         # Residual connection + FFN
+        return x, kv                                     # return layer output + current kv hiddens
 
 
 class GPT(nn.Module):
@@ -114,16 +113,16 @@ class GPT(nn.Module):
         super().__init__()
         assert config.vocab_size is not None
         assert config.block_size is not None
-        self.config = config
 
         self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(config.vocab_size, config.n_embd),
-            wpe = nn.Embedding(config.block_size, config.n_embd),
-            drop = nn.Dropout(config.dropout),
-            h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f = RMSNorm(config.n_embd, bias=config.bias),
+            wte   =   nn.Embedding(config.vocab_size, config.n_embd),
+            wpe   =   nn.Embedding(config.block_size, config.n_embd),
+            drop  =   nn.Dropout(config.dropout),
+            h     =   nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+            ln_f  =   RMSNorm(config.n_embd, bias=config.bias),
         ))
-        
+
+        self.config = config
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
 
@@ -150,30 +149,30 @@ class GPT(nn.Module):
         pretrained_state = pretrained_model.state_dict()
         current_state = self.state_dict()
         name_mapping = {
-            "transformer.wte.weight": "transformer.wte.weight",
-            "lm_head.weight": "lm_head.weight",
-            "transformer.wpe.weight": "transformer.wpe.weight",
+            "transformer.wte.weight":  "transformer.wte.weight",
+            "lm_head.weight":          "lm_head.weight",
+            "transformer.wpe.weight":  "transformer.wpe.weight",
             "transformer.ln_f.weight": "transformer.ln_f.weight",
-            "transformer.ln_f.bias": "transformer.ln_f.bias",
+            "transformer.ln_f.bias":   "transformer.ln_f.bias",
         }
         
         for i in range(min(len(self.transformer.h), pretrained_model.config.n_layer)):
             prefix = f"transformer.h.{i}."
             name_mapping.update({
-                f"{prefix}ln_1.weight": f"transformer.h.{i}.ln_1.weight",
-                f"{prefix}ln_1.bias": f"transformer.h.{i}.ln_1.bias",
-                f"{prefix}ln_2.weight": f"transformer.h.{i}.ln_2.weight",
-                f"{prefix}ln_2.bias": f"transformer.h.{i}.ln_2.bias",
+                f"{prefix}ln_1.weight":        f"transformer.h.{i}.ln_1.weight",
+                f"{prefix}ln_1.bias":          f"transformer.h.{i}.ln_1.bias",
+                f"{prefix}ln_2.weight":        f"transformer.h.{i}.ln_2.weight",
+                f"{prefix}ln_2.bias":          f"transformer.h.{i}.ln_2.bias",
                 
                 f"{prefix}attn.c_attn.weight": f"transformer.h.{i}.attn.c_attn.weight",
-                f"{prefix}attn.c_attn.bias": f"transformer.h.{i}.attn.c_attn.bias",
+                f"{prefix}attn.c_attn.bias":   f"transformer.h.{i}.attn.c_attn.bias",
                 f"{prefix}attn.c_proj.weight": f"transformer.h.{i}.attn.c_proj.weight",
-                f"{prefix}attn.c_proj.bias": f"transformer.h.{i}.attn.c_proj.bias",
+                f"{prefix}attn.c_proj.bias":   f"transformer.h.{i}.attn.c_proj.bias",
                 
-                f"{prefix}mlp.c_fc.weight": f"transformer.h.{i}.mlp.c_fc.weight",
-                f"{prefix}mlp.c_fc.bias": f"transformer.h.{i}.mlp.c_fc.bias",
-                f"{prefix}mlp.c_proj.weight": f"transformer.h.{i}.mlp.c_proj.weight",
-                f"{prefix}mlp.c_proj.bias": f"transformer.h.{i}.mlp.c_proj.bias",
+                f"{prefix}mlp.c_fc.weight":    f"transformer.h.{i}.mlp.c_fc.weight",
+                f"{prefix}mlp.c_fc.bias":      f"transformer.h.{i}.mlp.c_fc.bias",
+                f"{prefix}mlp.c_proj.weight":  f"transformer.h.{i}.mlp.c_proj.weight",
+                f"{prefix}mlp.c_proj.bias":    f"transformer.h.{i}.mlp.c_proj.bias",
             })
         
         for pt_name, our_name in name_mapping.items():
@@ -213,9 +212,7 @@ class GPT(nn.Module):
         
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
-        # pos = torch.arange(0, t, dtype=torch.long, device=device)
-        pos = torch.arange(0, t, device=device)
-
+        pos = torch.arange(0, t, dtype=torch.long, device=device)
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
