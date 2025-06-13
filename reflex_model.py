@@ -1,27 +1,38 @@
 import math
+import inspect
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-from flash_attn import flash_attn_func
+# from flash_attn import flash_attn_func
 
 from transformers import GPT2LMHeadModel
 
 
 # RMSNorm instead of LayerNorm
-class RMSNorm(nn.Module):
-    def __init__(self, ndim, eps=1e-6, bias=False):
+# class RMSNorm(nn.Module):
+#     def __init__(self, ndim, eps=1e-6, bias=False):
+#         super().__init__()
+#         self.weight =   nn.Parameter(torch.ones(ndim))
+#         self.bias   =   nn.Parameter(torch.zeros(ndim)) if bias else None
+#         self.eps    =   eps
+
+#     def forward(self, x):
+#         rms       =   torch.sqrt(torch.mean(x.pow(2), dim=-1, keepdim=True))
+#         x_normed  =   x / (rms + self.eps)
+#         return x_normed * self.weight + self.bias if self.bias else x_normed * self.weight
+
+
+class LayerNorm(nn.Module):
+    def __init__(self, ndim, bias):
         super().__init__()
-        self.weight =   nn.Parameter(torch.ones(ndim))
-        self.bias   =   nn.Parameter(torch.zeros(ndim)) if bias else None
-        self.eps    =   eps
+        self.weight = nn.Parameter(torch.ones(ndim))
+        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
 
-    def forward(self, x):
-        rms       =   torch.sqrt(torch.mean(x.pow(2), dim=-1, keepdim=True))
-        x_normed  =   x / (rms + self.eps)
-        return x_normed * self.weight + self.bias if self.bias else x_normed * self.weight
+    def forward(self, input):
+        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
 
-                
+
 class Attention(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -45,17 +56,20 @@ class Attention(nn.Module):
 
         cur_kv = (k, v)
         sa_h = self.n_head - len(prevs)
-        # self_attention = F.scaled_dot_product_attention(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], is_causal=True, dropout_p=self.dropout if self.training else 0)
-        self_attention = flash_attn_func(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], causal=True, dropout_p=self.dropout if self.training else 0)
+        self_attention = F.scaled_dot_product_attention(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], is_causal=True, dropout_p=self.dropout if self.training else 0)
+        # self_attention = flash_attn_func(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], causal=True, dropout_p=self.dropout if self.training else 0)
 
-        q = q[:, sa_h:, :, :]        
-        k = torch.cat([cur_k[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
-        v = torch.cat([cur_v[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
-        
-        # cross_attention = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.dropout if self.training else 0)
-        cross_attention = flash_attn_func(q, k, v, causal=False, dropout_p=self.dropout if self.training else 0)
+        if len(prevs) == 0:
+            y = self_attention
+        else:
+            q = q[:, sa_h:, :, :]
+            k = torch.cat([cur_k[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
+            v = torch.cat([cur_v[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
 
-        y = torch.cat([self_attention, cross_attention], dim=1)
+            # cross_attention = flash_attn_func(q, k, v, causal=False, dropout_p=self.dropout if self.training else 0)
+            cross_attention = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.dropout if self.training else 0)
+            y = torch.cat([self_attention, cross_attention], dim=1)
+            
         y = y.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
         return y, cur_kv
@@ -92,9 +106,9 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln_1   =   RMSNorm(config.n_embd)
+        self.ln_1   =   LayerNorm(config.n_embd, bias=config.bias) # RMSNorm
         self.attn   =   Attention(config)
-        self.ln_2   =   RMSNorm(config.n_embd)
+        self.ln_2   =   LayerNorm(config.n_embd, bias=config.bias) # RMSNorm
         self.mlp    =   MLP(config)
 
     def forward(self, x, prev_kvs=None):
@@ -119,7 +133,7 @@ class GPT(nn.Module):
             wpe   =   nn.Embedding(config.block_size, config.n_embd),
             drop  =   nn.Dropout(config.dropout),
             h     =   nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f  =   RMSNorm(config.n_embd, bias=config.bias),
+            ln_f  =   LayerNorm(config.n_embd, bias=config.bias) # RMSNorm
         ))
 
         self.config = config
@@ -275,3 +289,41 @@ class GPT(nn.Module):
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
         return n_params
+
+    
+    def configure_optimizers(self, weight_decay, learning_rate, betas, device_type):
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device_type == 'cuda'
+        extra_args = dict(fused=True) if use_fused else dict()
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+        print(f"using fused AdamW: {use_fused}")
+
+        return optimizer
+
+    def estimate_mfu(self, fwdbwd_per_iter, dt):
+        N = self.get_num_params()
+        cfg = self.config
+        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd//cfg.n_head, cfg.block_size
+        flops_per_token = 6*N + 12*L*H*Q*T
+        flops_per_fwdbwd = flops_per_token * T
+        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+
+        flops_achieved = flops_per_iter * (1.0/dt)
+        flops_promised = 312e12
+        mfu = flops_achieved / flops_promised
+        return mfu
