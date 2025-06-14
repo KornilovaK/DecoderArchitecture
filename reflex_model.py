@@ -3,34 +3,20 @@ import inspect
 
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-# from flash_attn import flash_attn_func
-
+import torch.nn.functional as F
 from transformers import GPT2LMHeadModel
 
 
 # RMSNorm instead of LayerNorm
-# class RMSNorm(nn.Module):
-#     def __init__(self, ndim, eps=1e-6, bias=False):
-#         super().__init__()
-#         self.weight =   nn.Parameter(torch.ones(ndim))
-#         self.bias   =   nn.Parameter(torch.zeros(ndim)) if bias else None
-#         self.eps    =   eps
-
-#     def forward(self, x):
-#         rms       =   torch.sqrt(torch.mean(x.pow(2), dim=-1, keepdim=True))
-#         x_normed  =   x / (rms + self.eps)
-#         return x_normed * self.weight + self.bias if self.bias else x_normed * self.weight
-
-
-class LayerNorm(nn.Module):
-    def __init__(self, ndim, bias):
+class RMSNorm(nn.Module):
+    def __init__(self, ndim, bias=False):
         super().__init__()
-        self.weight = nn.Parameter(torch.ones(ndim))
-        self.bias = nn.Parameter(torch.zeros(ndim)) if bias else None
+        self.weight =   nn.Parameter(torch.ones(ndim))
+        self.bias   =   nn.Parameter(torch.zeros(ndim)) if bias else None
+        self.eps    =   1e-6
 
     def forward(self, input):
-        return F.layer_norm(input, self.weight.shape, self.weight, self.bias, 1e-5)
+        return F.rms_norm(input, self.weight.shape, self.weight, self.eps)
 
 
 class Attention(nn.Module):
@@ -46,31 +32,27 @@ class Attention(nn.Module):
         self.n_embd         =   config.n_embd
         self.dropout        =   config.dropout
 
-    def forward(self, x, prevs):
-        B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
-
+    def forward(self, x, prev_hiddens):
+        B, T, C = x.size()
+        head_size = C // self.n_head
         q, k, v  = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, head_size).transpose(1, 2)
+        q = q.view(B, T, self.n_head, head_size).transpose(1, 2)
+        v = v.view(B, T, self.n_head, head_size).transpose(1, 2)
 
-        cur_kv = (k, v)
-        sa_h = self.n_head - len(prevs)
-        self_attention = F.scaled_dot_product_attention(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], is_causal=True, dropout_p=self.dropout if self.training else 0)
-        # self_attention = flash_attn_func(q[:, :sa_h, :, :], k[:, :sa_h, :, :], v[:, :sa_h, :, :], causal=True, dropout_p=self.dropout if self.training else 0)
-
-        if len(prevs) == 0:
-            y = self_attention
-        else:
-            q = q[:, sa_h:, :, :]
-            k = torch.cat([cur_k[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
-            v = torch.cat([cur_v[:, (sa_h+i), :, :].unsqueeze(1) for i, (cur_k, cur_v) in enumerate(prevs)], dim=1)
-
-            # cross_attention = flash_attn_func(q, k, v, causal=False, dropout_p=self.dropout if self.training else 0)
-            cross_attention = F.scaled_dot_product_attention(q, k, v, is_causal=False, dropout_p=self.dropout if self.training else 0)
-            y = torch.cat([self_attention, cross_attention], dim=1)
+        if prev_hiddens is None: # only self attention
+            cur_kv = (k[:, -1, :, :].unsqueeze(1), v[:, -1, :, :].unsqueeze(1))
+            attn = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0)
             
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
+        else: # self attention + cross attention with previous layers
+            sa_h = self.n_head - prev_hiddens['k'].shape[1]
+            k = torch.cat([k[:, :sa_h, :, :], prev_hiddens['k']], dim=1)
+            v = torch.cat([v[:, :sa_h, :, :], prev_hiddens['v']], dim=1)
+            
+            cur_kv = (k[:, (sa_h-1), :, :].unsqueeze(1), v[:, (sa_h-1), :, :].unsqueeze(1))
+            attn = F.scaled_dot_product_attention(q, k, v, is_causal=True, dropout_p=self.dropout if self.training else 0)
+            
+        y = attn.transpose(1, 2).contiguous().view(B, T, C)
         y = self.resid_dropout(self.c_proj(y))
         return y, cur_kv
 
@@ -90,9 +72,11 @@ class SwiGLU(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.c_fc    =   nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.act     =   SwiGLU(4 * config.n_embd, 4 * config.n_embd, bias=config.bias)
-        self.c_proj  =   nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        # assert (4 * config.n_embd * 2 / 3) % 2 == 0
+        hidden_dim   =   4 * config.n_embd  # * 2 // 3
+        self.c_fc    =   nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
+        self.act     =   SwiGLU(hidden_dim, hidden_dim, bias=config.bias)
+        self.c_proj  =   nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
         self.dropout =   nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -106,9 +90,9 @@ class MLP(nn.Module):
 class Block(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln_1   =   LayerNorm(config.n_embd, bias=config.bias) # RMSNorm
+        self.ln_1   =   RMSNorm(config.n_embd, bias=config.bias)
         self.attn   =   Attention(config)
-        self.ln_2   =   LayerNorm(config.n_embd, bias=config.bias) # RMSNorm
+        self.ln_2   =   RMSNorm(config.n_embd, bias=config.bias)
         self.mlp    =   MLP(config)
 
     def forward(self, x, prev_kvs=None):
@@ -133,7 +117,7 @@ class GPT(nn.Module):
             wpe   =   nn.Embedding(config.block_size, config.n_embd),
             drop  =   nn.Dropout(config.dropout),
             h     =   nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
-            ln_f  =   LayerNorm(config.n_embd, bias=config.bias) # RMSNorm
+            ln_f  =   RMSNorm(config.n_embd, bias=config.bias)
         ))
 
         self.config = config
@@ -231,13 +215,16 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
 
-        prevs = []
+        prev_hiddens = None
         for i, block in enumerate(self.transformer.h):
-            x, prev = block(x, prevs)
-            prevs.append(prev)
+            x, (prev_k, prev_v) = block(x, prev_hiddens)
+            if i == 0:
+                prev_hiddens = {'k': prev_k, 'v': prev_v}
+            else:
+                prev_hiddens['k'] = torch.cat([prev_k, prev_hiddens['k']], dim=1)
+                prev_hiddens['v'] = torch.cat([prev_v, prev_hiddens['v']], dim=1)
 
         x = self.transformer.ln_f(x)
-        
         if targets is not None:
             logits = self.lm_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
