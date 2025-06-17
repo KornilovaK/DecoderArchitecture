@@ -4,7 +4,9 @@ import inspect
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 from transformers import GPT2LMHeadModel
+from huggingface_hub import PyTorchModelHubMixin
 
 
 # RMSNorm instead of LayerNorm
@@ -72,8 +74,7 @@ class SwiGLU(nn.Module):
 class MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        # assert (4 * config.n_embd * 2 / 3) % 2 == 0
-        hidden_dim   =   4 * config.n_embd  # * 2 // 3
+        hidden_dim   =   4 * config.n_embd
         self.c_fc    =   nn.Linear(config.n_embd, hidden_dim, bias=config.bias)
         self.act     =   SwiGLU(hidden_dim, hidden_dim, bias=config.bias)
         self.c_proj  =   nn.Linear(hidden_dim, config.n_embd, bias=config.bias)
@@ -105,7 +106,7 @@ class Block(nn.Module):
         return x, kv                                     # return layer output + current kv hiddens
 
 
-class GPT(nn.Module):
+class GPT(nn.Module, PyTorchModelHubMixin):
 
     def __init__(self, config):
         super().__init__()
@@ -124,9 +125,26 @@ class GPT(nn.Module):
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         self.transformer.wte.weight = self.lm_head.weight
 
-        self.apply(self._init_weights)
-        self._init_from_pretrained_weights()
+        if config.init_type == 'init_pretrained_new':
+            self.apply(self._init_weights)
+            self._init_from_pretrained_weights()
+        elif config.init_type == 'load_pretrained':
+            self.load_trained_weights()
+            
+    def load_trained_weights(self):
+        model_state = torch.load(self.config.pretrained_model_path, weights_only=True)
+            
+        fixed_state_dict = {}
+        for key, value in model_state['model'].items():
+            if key.startswith('_orig_mod.'):
+                new_key = key.replace('_orig_mod.', '')
+                fixed_state_dict[new_key] = value
+            else:
+                fixed_state_dict[key] = value
 
+        self.load_state_dict(fixed_state_dict)
+        self.transformer.wte.weight = self.lm_head.weight
+        print('Loaded trained weights')
     
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -236,12 +254,13 @@ class GPT(nn.Module):
         return logits, loss
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, top_p=None, beam_sample=False):
+    def generate(self, idx, max_new_tokens, tokenized, cur_pad_token, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
+        count_pad_token = 0
         for _ in range(max_new_tokens):
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
             logits, _ = self(idx_cond)
@@ -250,25 +269,19 @@ class GPT(nn.Module):
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
-                
-            if top_p is not None:
-                try:
-                    sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                    cumulative_probs = torch.cumsum(F.softmax(sorted_logits, dim=-1), dim=-1)
-                    remove_mask = cumulative_probs > top_p
-                    remove_mask[..., 1:] = remove_mask[..., :-1].clone()
-                    logits[sorted_indices[remove_mask]] = -float('Inf')
-                except Exception as e:
-                    print(f"FIX TOP-P: {e}")
                     
             probs = F.softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
             
-            if beam_sample:
-                print("Not implemented yet")
+            if idx_next in tokenized:
+                return idx
                 
-            idx_next = torch.multinomial(probs, num_samples=1) # if beam_sample == True: torch.multinomial(probs, num_samples=num_samples)
-            idx = torch.cat((idx, idx_next), dim=1)
+            if idx_next == cur_pad_token:
+                count_pad_token += 1
+                if count_pad_token == 3:
+                    return idx
 
+            idx = torch.cat((idx, idx_next), dim=1)
         return idx
     
     def get_num_params(self, non_embedding=True):
