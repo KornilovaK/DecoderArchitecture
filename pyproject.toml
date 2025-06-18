@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "rexlex-gpt"
+version = "0.1.0"
+description = "Russian GPT model implementation with Reflex Attention mechanism"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "MIT"}
+
+dependencies = [
+    "torch>=2.0,<2.8",
+    "transformers>=4.30,<5.0",
+    "huggingface-hub>=0.30,<1.0",
+    "numpy>=1.26,<2.0",
+    "tqdm>=4.0,<5.0",
+    "accelerate>=0.20,<1.0",
+    "safetensors>=0.5,<1.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "black>=23.0",
+    "flake8>=6.0",
+    "ipython>=8.0",
+    "jupyter>=1.0"
+]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["rexlex_model*"]
+exclude = ["tests*"]
+
+[project.scripts]
+rexlex-train = "rexlex_model:train_cli"
+rexlex-generate = "rexlex_model:generate_cli"
