@@ -1,7 +1,6 @@
 {
     "wandb_log": true,
     "wandb_project": "reflex_attention",
-    "out_dir": "/home/user/rugpt",
     "eval_interval": 250,
     "eval_iters": 200,
     "log_interval": 10,
@@ -24,7 +23,5 @@
     "master_process": true,
     "seed_offset": 0,
     "ddp_world_size": 1,
-    "wandb_run_name": "KornilovaK-reflex_attention",
-    "dtype": "bfloat16",
-    "data_dir": "/home/user/data"
+    "dtype": "bfloat16"
 }
