@@ -57,3 +57,6 @@ Based on nanoGPT (GPT-2)
 Результат [RuGPT-reflex](https://huggingface.co/Eka-Korn/RuGPT-reflex)
 
 ### Внимание: работа требует доработки и дообучения
+![test1](extra/test1.jpg)
+![test2](extra/test2.jpg)
+![test3](extra/test3.jpg)
