@@ -17,17 +17,43 @@ Based on nanoGPT (GPT-2)
 
 ## Мое решение
 Заключается в том, что оно включает в себя элементы kv-cache и стремится решить проблему забывания информации:
-На первом слое все головы считают self-attention по текущим хидденам (hidden в данном случае - это query, key, value). Затем на каждом следующем мы выделяем по 1 голове на подсчет cross-attention между текущим query и key, value из предыдущих слоев. Например, модель из 8 голов 6 слоев (на каждом слое сохраняем текущие key и value):
-1 слой) 8 голов на self-attention
-2 слой) 7 голов на self-attention, 1 голова на cross-attention с 1м слоем
-3 слой) 6 голов на self-attention, 1 голова на cross-attention с 2м слоем, 1 голова на cross-attention с 1м слоем
-...
-6 слой) 3 головы на self-attention, 1 голова на cross-attention с 5м слоем, 1 голова на cross-attention с 4м слоем, 1 голова на cross-attention с 3м слоем, 1 голова на cross-attention с 2м слоем, 1 голова на cross-attention с 1м слоем
-Все головы конкатенируются для дальнейших вычислений
 
-Из других изменений: использовала Pre RMSNorm и SwiGLU
+- На первом слое все головы считают self-attention по текущим хидденам (hidden в данном случае - это query, key, value). Затем на каждом следующем мы выделяем по 1 голове на подсчет cross-attention между текущим query и key, value из предыдущих слоев. Например, модель из 8 голов 6 слоев (на каждом слое сохраняем текущие key и value):
+  1 слой) 8 голов на self-attention
+  2 слой) 7 голов на self-attention, 1 голова на cross-attention с 1м слоем
+  3 слой) 6 голов на self-attention, 1 голова на cross-attention с 2м слоем, 1 голова на cross-attention с 1м слоем
+  ...
+  6 слой) 3 головы на self-attention, 1 голова на cross-attention с 5м слоем, 1 голова на cross-attention с 4м слоем, 1 голова на cross-attention с 3м слоем, 1 голова на cross-attention с 2м слоем, 1 голова на cross-attention с 1м слоем
 
-Там, где возможно, инициализировала весами [ai-forever/rugpt3large_based_on_gpt2](https://huggingface.co/ai-forever/rugpt3large_based_on_gpt2), использовала этот же токенайзер
-Датасет - [Den4ikAI/russian_instructions_2](https://huggingface.co/datasets/Den4ikAI/russian_instructions_2)
+- Все головы конкатенируются для дальнейших вычислений
+- Из других изменений: использовала Pre RMSNorm и SwiGLU
+- Там, где возможно, инициализировала весами [ai-forever/rugpt3large_based_on_gpt2](https://huggingface.co/ai-forever/rugpt3large_based_on_gpt2), использовала этот же токенайзер
+- Датасет - [Den4ikAI/russian_instructions_2](https://huggingface.co/datasets/Den4ikAI/russian_instructions_2)
+- Из дальнейших улучшений: сделать распределение голов обучаемым, использовать rotary embeddings
 
-в дальнейшем
+## Обучение:
+- A100, cuda, в bfloat16
+- batch_size = 8
+- block_size = 2048
+- vocab_size = 50257
+- n_layer = 6
+- n_head = 8
+- n_embd = 1536
+- dropout = 0.1
+- bias = True
+- gradient_accumulation_steps = 2
+
+![Графики обучения](extra/charts.png)
+![train_loss](extra/train_loss.png)
+![val_loss](extra/val_loss.png)
+
+## Как запустить:
+1) Создать виртуальное python окружение, установить все библиотеки ```pip install -r requirements.txt```
+2) Загрузить локально веса ```prepare_notebooks/load_model.ipynb```
+3) Подготовить датасет ```prepare_notebooks/make_dataset.ipynb```
+4) Запустить ```main_notebooks/train_pin_model.ipynb```. **params** лежат в configs! 
+5) Протестировать ```main_notebooks/test.ipynb```
+
+Результат [RuGPT-reflex](https://huggingface.co/Eka-Korn/RuGPT-reflex)
+
+### Внимание: работа требует доработки и дообучения
